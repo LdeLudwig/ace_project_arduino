@@ -9,8 +9,8 @@
 ------------------------------------------------------------------------------*/
 
 // Variáveis para conexão com WiFi
-const char* ssid = "VIVOFIBRA-8D50";
-const char* password = "184E53AF32";
+const char* ssid = "VIVOFIBRA-8D50"; // Mudar de acordo com o WiFi que estiver utilizando
+const char* password = "184E53AF32"; // Mudar para senha do WiFi correspondente
 
 // Variáveis para conexão com servidor
 const char* server_ip = "192.168.15.177";
@@ -81,6 +81,59 @@ void socketConnection(){
   const char* msg = "Olá, servidor! Esta é uma mensagem do ESP32 via TCP.";
   send(sock, msg, strlen(msg), 0);
 }
+
+/*------------------------------------------------------------------------------ 
+                        SEÇÃO DO TRATAMENTO DOS DADOS
+------------------------------------------------------------------------------*/
+int receiveAndProcessData(int sock){
+  const size_t jsonBufferSize = 1024;
+  char jsonBuffer[jsonBufferSize];
+
+  memset(jsonBuffer, 0, jsonBufferSize);
+
+  int bytesReceived = recv(sock, jsonBuffer, jsonBufferSize - 1, 0);
+  if(bytesReceived < 0){
+    Serial.println("Erros ao receber dados do servidor");
+    return;
+  } else if (bytesReceived == 0){
+    Serial.println("Erros ao receber dados do servidor");
+    return; 
+  }
+
+  // Deserializando o JSON
+  JSONVar jsonObject = JSON.parse(jsonBuffer);
+
+  // Verifica se houve erro na Deserialização
+  if(JSON.typeof(jsonObject) == "undefined"){
+    Serial.println("Erro ao analisar JSON recebido");
+    return;
+  }
+
+  // Exemplo: Acessando um campo específico
+  if (jsonObject.hasOwnProperty("product_num")) {
+    int product = (int)jsonObject["product_num"];
+    return product;
+  } else{
+    Serial.println("Propriedade 'product_num' não encontrada no JSON");
+  }
+}
+
+void createAndSendData(int sock, int qty, int product_num, int operation){
+  /*-------------------------------------------------------------------------------- 
+    Lógica para criar objeto json e enviar pelo socket conforme alteração na balança
+  ---------------------------------------------------------------------------------*/
+  DynamicJsonDocument doc(512);
+  doc['operation'] = operation;
+  doc['product_num'] = product_num
+  doc['qty'] = qty
+
+  String jsonString;
+  serializeJson(doc, jsonString)
+  Serial.println(jsonString)
+  
+  send(sock, jsonString, strlen(jsonString), 0);
+}
+
 
 /*------------------------------------------------------------------------------ 
                           SEÇÃO DE CONTROLE DO ROBÔ
@@ -299,20 +352,20 @@ int quantidadeItem1 = 0;  // Quantidade de itens de 25g
 int quantidadeItem2 = 0;  // Quantidade de itens de 32g
 
 // Funções auxiliares (declarações)
-long ReadRAW(HX711& scale, long long* BUFF);
+long readRAW(HX711& scale, long long* BUFF);
 float ConvertVal(long RAWVAL, long ZEROVAL, long CALIBVAL);
-long CalculateAverage(long long* BUFF);
-void Tara(HX711& scale, long& ZEROVAL, int buttonPin);
-void IdentificarPeca(float peso, int balanca);
+long calculateAverage(long long* BUFF);
+void tare(HX711& scale, long& ZEROVAL, int buttonPin);
+void identifyProduct(float peso, int balanca);
 
 // Converte o valor RAW para gramas com base na calibração e no ponto de tara
-float ConvertVal(long RAWVAL, long ZEROVAL, long CALIBVAL) {
+float convertVal(long RAWVAL, long ZEROVAL, long CALIBVAL) {
   float unit = (float)PESOBASE / (float)(ZEROVAL - CALIBVAL);  // Unidade por grama
   return (float)(ZEROVAL - RAWVAL) * unit;  // Converte o RAW em peso
 }
 
 // Calcula a média do buffer de leituras
-long CalculateAverage(long long* BUFF) {
+long calculateAverage(long long* BUFF) {
   long long ACC = 0;
   for (short i = 0; i < BUFFL; i++) {
     ACC += BUFF[i];
@@ -321,7 +374,7 @@ long CalculateAverage(long long* BUFF) {
 }
 
 // Realiza a tara para a balança especificada
-void Tara(HX711& scale, long& ZEROVAL, int buttonPin) {
+void tare(HX711& scale, long& ZEROVAL, int buttonPin) {
   Serial.print("Realizando tara na balança do botão ");
   Serial.println(buttonPin);
   while (!scale.is_ready());  // Aguarda que a balança esteja pronta
@@ -332,7 +385,7 @@ void Tara(HX711& scale, long& ZEROVAL, int buttonPin) {
 }
 
 // Identifica o tipo de item com base no peso e atualiza a quantidade
-void IdentificarPeca(float peso, int balanca) {
+void identifyProduct(float peso, int balanca) {
   if (balanca == 1) {
     // Verifica se o peso está dentro da tolerância para o item 1
     if (peso >= PESO_ITEM1 - TOLERANCIA1 && peso <= PESO_ITEM1 + TOLERANCIA1) {
@@ -354,6 +407,64 @@ void IdentificarPeca(float peso, int balanca) {
   }
 }
 
+// Calcula peso 
+void calculateWeight(long RAW1, long RAW2){
+  // Coleta e processa leituras de ambas as balanças
+  for (short z = 0; z < BUFFL; z++) {
+    // Aguarda que ambas as balanças estejam prontas
+    while (!scale1.is_ready() || !scale2.is_ready());
+
+    // Leitura da balança 1
+    long reading1 = scale1.read();
+    for (short i = 0; i < BUFFL - 1; i++) {
+      BUFF1[i] = BUFF1[i + 1];  // Desloca os valores no buffer
+    }
+    BUFF1[BUFFL - 1] = reading1;  // Adiciona a nova leitura
+
+    // Leitura da balança 2
+    long reading2 = scale2.read();
+    for (short i = 0; i < BUFFL - 1; i++) {
+      BUFF2[i] = BUFF2[i + 1];  // Desloca os valores no buffer
+    }
+    BUFF2[BUFFL - 1] = reading2;  // Adiciona a nova leitura
+  }
+
+  // Calcula a média das leituras RAW para suavizar os dados
+  RAW1 = calculateAverage(BUFF1);
+  RAW2 = calculateAverage(BUFF2);
+
+  // Exibe os valores RAW para ambas as balanças
+  Serial.print("RAW Balança 1: ");
+  Serial.println(RAW1);  // Exibe o valor RAW da balança 1
+
+  Serial.print("RAW Balança 2: ");
+  Serial.println(RAW2);  // Exibe o valor RAW da balança 2
+
+  // Converte os valores RAW para gramas
+  float peso1 = convertVal(RAW1, ZEROVAL1, CALIBVAL1);
+  float peso2 = convertVal(RAW2, ZEROVAL2, CALIBVAL2);
+
+  // Exibe e identifica os itens para cada balança
+  Serial.print("Balança 1 - Peso:");
+  Serial.print(peso1);
+  Serial.println("g");
+  identifyProduct(peso1, 1);  // Identifica os itens da balança 1
+
+  Serial.print("Balança 2 - Peso:");
+  Serial.print(peso2);
+  Serial.println("g");
+  identifyProduct(peso2, 2);  // Identifica os itens da balança 2
+
+  // Exibe as quantidades atuais de itens armazenados
+  Serial.print("Quantidade de itens de 25g: ");
+  Serial.println(quantidadeItem1);
+  Serial.print("Quantidade de itens de 32g: ");
+  Serial.println(quantidadeItem2);
+}
+
+/*------------------------------------------------------------------------------ 
+                                    MAIN
+------------------------------------------------------------------------------*/
 
 void setup() {
   scale1.begin(LOADCELL1_DOUT_PIN, LOADCELL1_SCK_PIN);  // Inicializa a balança 1
@@ -390,44 +501,59 @@ void setup() {
 }
 
 void loop() {
-  // Enviar mensagens periódicas
-  const char* msg = "Mensagem do ESP32 via TCP.";
-  delay(5000);
-
-  /*------------------------------------------------------- 
-    Adicionar lógica para receber e decodificar objeto Json
-   ------------------------------------------------------*/
-
-  /*-------------------------------------------------------------------------------------------------------------------------------------------------------------
-    Adicionar lógica para processar objeto Json e determinar movimento
-    Aqui devo adicionar uma lógica para só realizar o movimento quando chegar o pedido,
-    se o pedido chegar enquanto um estiver rodando, ele entra na fila. Então é necessário criar uma lista que vai adicionar os pedidos conforme ordem de chegada.
-    Por final, deve-se adicionar uma lógica para verificar se há pedidos na lista.
-   ------------------------------------------------------------------------------------------------------------------------------------------------------------*/
-
-
-  // Espera por uma entrada do usuário
-  if (Serial.available() > 0) {
-    int comando = Serial.parseInt();
-    if (comando == 1) {
-      // Sequência para pegar a peça 1.1
-      movimento11();
-    } else if (comando == 2) {
-      // Sequência para pegar a peça 1.2
-      movimento12();
-    } else if (comando == 3) {
-      // Sequência para pegar a peça 2.1
-      movimento21();
-    } else if (comando == 4) {
-      // Sequência para pegar a peça 2.2
-      movimento22();
-    }
+  /*------------------------------ 
+    Botões para tarar as balanças 
+  ------------------------------*/
+  if (digitalRead(BUTTON_TARA1) == LOW) {
+    tare(scale1, ZEROVAL1, BUTTON_TARA1);  // Realiza a tara na balança 1
+  }
+  if (digitalRead(BUTTON_TARA2) == LOW) {
+    tare(scale2, ZEROVAL2, BUTTON_TARA2);  // Realiza a tara na balança 2
   }
 
+  int command = 0
+  
+  long RAW1 = 0, RAW2 = 0;  // Leituras RAW das balanças
 
-  /*---------------------------------------------------------------------------------------------------------------------------------------------------------- 
-    Aqui é necessário aplicar uma lógica para verificar o peso da balança atual e comparar com o peso antigo.
-    Também precisa contruir Json de acordo com a alteração do peso da balança, assim que a balança registra um peso pre-determinado da peça a mais ou a menos,
-    essa função é chamada para construir o objeto Json e enviar para o servidor Storage.py 
-  ----------------------------------------------------------------------------------------------------------------------------------------------------------*/
+  command = receiveAndProcessData(sock)
+
+  if (command != 0){
+    calculateWeight(RAW1, RAW2)   
+
+    if (command == 1){
+      if (quantidadeItem1 == 2){
+        // Sequência para pegar a peça 1.1
+        movimento11();
+      }else if (quantidadeItem1 == 1){
+        // Sequência para pegar a peça 1.2
+        movimento12();      
+      }
+    } else if (command == 2){
+      if(quantidadeItem2 == 2){
+        // Sequência para pegar a peça 2.1
+        movimento21();
+      }else if (quantidadeItem2 == 1){
+        // Sequência para pegar a peça 2.2
+        movimento22();
+      }
+    }
+
+    lastQtyProd1 = quantidadeItem1
+    lastQtyProd2 = quantidadeItem2
+
+    delay(5000)
+
+    calculateWeight(RAW1, RAW2)
+    if(quantidadeItem1 < lastQtyProd1){
+      createAndSendData(sock, lastQtyProd1 - quantidadeItem1, 1, 0);
+    } else if (quantidadeItem1 > lastQtyProd1){
+      createAndSendData(sock, quantidadeItem1 - lastQtyProd1, 1, 1);
+    } else if(quantidadeItem2 < lastQtyProd2){
+      createAndSendData(sock, lastQtyProd2 - quantidadeItem2, 2, 0);
+    } else if(quantidadeItem2 > lastQtyProd2){
+      createAndSendData(sock, quantidadeItem2 - lastQtyProd2, 2, 1);
+    }
+
+  }
+  
 }
